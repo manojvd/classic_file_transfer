@@ -1,51 +1,86 @@
 import socket
 import hashlib
+import os
 
-CHUNK_SIZE = 1024  # Define chunk size
+# Client Configuration
+HOST = "127.0.0.1"
+PORT = 5000
+CHUNK_SIZE = 1024
 
-def compute_checksum(data):
-    """Compute SHA256 checksum of received data."""
-    hasher = hashlib.sha256()
-    hasher.update(data)
-    return hasher.hexdigest()
 
-def receive_file(server_ip, port, file_name):
-    """Request file from server and save it after verifying checksum."""
-    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    client.connect((server_ip, port))
+def compute_checksum(filename):
+    """Compute SHA-256 checksum of a file."""
+    sha256 = hashlib.sha256()
+    with open(filename, "rb") as f:
+        while True:
+            chunk = f.read(4096)
+            if not chunk:
+                break
+            sha256.update(chunk)
+    return sha256.hexdigest()
 
-    # Send file name to server
-    client.sendall(file_name.encode())
 
-    # Receive checksum from server
-    expected_checksum = client.recv(64).decode()
-    
-    # Receive file chunks
-    received_data = {}
-    while True:
-        chunk_data = client.recv(CHUNK_SIZE + 8)  # 8 bytes for sequence number
-        if not chunk_data:
-            break
+def send_file(client_socket, filepath):
+    """Send a file to the server."""
+    filename = os.path.basename(filepath)
+    filesize = os.path.getsize(filepath)
 
-        seq_num = int(chunk_data[:8].decode())  # Extract sequence number
-        received_data[seq_num] = chunk_data[8:]  # Store chunk in dictionary
+    # Send file metadata
+    client_socket.send(f"{filename}|{filesize}".encode())
 
-    # Reassemble the file in order
-    ordered_data = b''.join(received_data[i] for i in sorted(received_data.keys()))
+    # Send file in chunks
+    with open(filepath, "rb") as f:
+        while True:
+            chunk = f.read(CHUNK_SIZE)
+            if not chunk:
+                break
+            client_socket.send(chunk)
+
+    print(f"[UPLOADED] {filename} ({filesize} bytes) to server.")
+
+
+def receive_file(client_socket, original_filename):
+    """Receive a file back from the server and verify integrity."""
+    checksum = client_socket.recv(64).decode()
+
+    received_filename = f"received_{original_filename}"
+    chunks = {}
+
+    with open(received_filename, "wb") as f:
+        while True:
+            data = client_socket.recv(CHUNK_SIZE + 10)  # Extra for sequence number
+            if not data:
+                break
+            parts = data.split(b"|", 1)
+            if len(parts) != 2:
+                continue
+            seq_num = int(parts[0])
+            chunks[seq_num] = parts[1]
+
+        for i in sorted(chunks.keys()):
+            f.write(chunks[i])
+
+    print(f"[DOWNLOADED] {received_filename} received from server.")
 
     # Verify checksum
-    received_checksum = compute_checksum(ordered_data)
-    if received_checksum == expected_checksum:
-        with open(f"received_{file_name}", 'wb') as f:
-            f.write(ordered_data)
-        print("Transfer Successful: File received and verified.")
+    received_checksum = compute_checksum(received_filename)
+    if received_checksum == checksum:
+        print("[SUCCESS] File integrity verified.")
     else:
-        print("Transfer Failed: Checksum mismatch.")
+        print("[ERROR] File is corrupted. Retransmission needed.")
 
-    client.close()
+
+def start_client(filepath):
+    """Starts the client and handles file transfer."""
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client_socket.connect((HOST, PORT))
+
+    send_file(client_socket, filepath)
+    receive_file(client_socket, os.path.basename(filepath))
+
+    client_socket.close()
+
 
 if __name__ == "__main__":
-    server_ip = "127.0.0.1"
-    port = 5000
-    file_name = "data.txt"
-    receive_file(server_ip, port, file_name)
+    file_to_send = input("Enter the path of the file to upload: ")
+    start_client(file_to_send)
